@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+// cic (Chrome in CLI): drive Chrome tabs from the terminal through the cic extension, local only.
+// Targets are a CSS selector or a ref from `snapshot` (@e12). Points are CSS pixels, the same
+// pixels as a `screenshot`, so a point read off a screenshot can be clicked as is.
+//
+//   cic status                              daemon up? extension connected? versions
+//   cic tabs                                tabs in the cic group
+//   cic open <url>                          new tab in the cic group, prints its id
+//   cic navigate <tab> <url|back|forward|reload>
+//   cic snapshot <tab> [--all] [filter]     interactive elements with @refs (read_page / find)
+//   cic text <tab>                          page text
+//   cic eval <tab> <js>                     run JS, print the value
+//   cic click <tab> <target|x y> [--right] [--double] [--triple]
+//   cic hover <tab> <target|x y>            cic drag <tab> <from> <to>   (targets or "x,y")
+//   cic scroll <tab> [up|down|left|right] [amount] [--at <target>]    cic scrollto <tab> <target>
+//   cic type <tab> <text>                   cic key <tab> <combo...> [--repeat n]   (Enter, cmd+a, shift+Tab)
+//   cic fill <tab> <target> <value>         set an input/select/textarea/checkbox (form_input)
+//   cic upload <tab> <target> <file...>     set a file input
+//   cic wait <tab> <target|ms>
+//   cic screenshot <tab> [file.png] [--region x0,y0,x1,y1]
+//   cic network <tab> [filter] [--clear]    cic body <tab> <filter>   (last matching response body)
+//   cic console <tab> [regex] [--clear]     cic dialog <tab> [accept|dismiss] [text]
+//   cic resize <tab> <width> <height>       cic close <tab>
+//   cic reload-extension                    pick up an updated extension
+//   cic stop                                stop the daemon
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const PORT = 18765;
+const HOME = path.join(process.env.HOME, '.cic');
+const EXTENSION = path.join(path.dirname(fs.realpathSync(__filename)), '..', 'extension');
+const PID = path.join(HOME, 'daemon.pid');
+const SHOTS = path.join(HOME, 'shots');
+
+function serve() {
+  const queue = [];
+  const waiting = new Map(); // job id -> http response of the cic call
+  let poller = null;
+  let lastPoll = 0;
+  let nextId = 1;
+
+  const send = (res, status, body) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(body === undefined ? '' : JSON.stringify(body));
+  };
+  const dispatch = () => {
+    if (poller && queue.length) {
+      send(poller, 200, queue.shift());
+      poller = null;
+    }
+  };
+  const body = (req) =>
+    new Promise((resolve) => {
+      let data = '';
+      req.on('data', (c) => (data += c));
+      req.on('end', () => resolve(data ? JSON.parse(data) : {}));
+    });
+
+  http
+    .createServer(async (req, res) => {
+      if (req.url === '/next') {
+        lastPoll = Date.now();
+        if (poller) send(poller, 204);
+        poller = res;
+        const timer = setTimeout(() => {
+          if (poller === res) {
+            poller = null;
+            send(res, 204);
+          }
+        }, 20_000);
+        res.on('close', () => clearTimeout(timer));
+        return dispatch();
+      }
+      if (req.url === '/result') {
+        const reply = await body(req);
+        const caller = waiting.get(reply.id);
+        waiting.delete(reply.id);
+        if (caller) send(caller, reply.ok ? 200 : 500, reply);
+        return send(res, 204);
+      }
+      if (req.url === '/status') {
+        return send(res, 200, { extension: Date.now() - lastPoll < 25_000 });
+      }
+      if (req.url === '/cmd') {
+        const job = { id: nextId++, ...(await body(req)) };
+        waiting.set(job.id, res);
+        queue.push(job);
+        setTimeout(() => {
+          if (waiting.delete(job.id)) send(res, 504, { ok: false, error: 'extension did not answer in 60s' });
+        }, 60_000);
+        return dispatch();
+      }
+      send(res, 404);
+    })
+    .listen(PORT, '127.0.0.1', () => fs.writeFileSync(PID, String(process.pid)));
+}
+
+function request(route, payload) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: PORT, path: route, method: payload ? 'POST' : 'GET' },
+      (res) => {
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }));
+      },
+    );
+    req.on('error', reject);
+    req.end(payload ? JSON.stringify(payload) : undefined);
+  });
+}
+
+async function ensureDaemon() {
+  try {
+    return (await request('/status')).body;
+  } catch {
+    fs.mkdirSync(HOME, { recursive: true });
+    spawn(process.execPath, [__filename, 'serve'], { detached: true, stdio: 'ignore' }).unref();
+    for (let i = 0; i < 50; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      try {
+        return (await request('/status')).body;
+      } catch {}
+    }
+    throw new Error('daemon did not start');
+  }
+}
+
+async function waitForExtension() {
+  for (let i = 0; i < 30; i++) {
+    if ((await request('/status')).body.extension) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`extension not connected: load ${EXTENSION} in chrome://extensions (Load unpacked)`);
+}
+
+function usage() {
+  const lines = fs.readFileSync(__filename, 'utf8').split('\n');
+  const end = lines.findIndex((l) => l.startsWith('const http'));
+  console.error(lines.slice(1, end).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+  process.exit(1);
+}
+
+/** Splits `--flag value` and `--switch` options from positional args. */
+function options(args, valued = []) {
+  const flags = {};
+  const rest = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('--')) rest.push(a);
+    else if (valued.includes(a.slice(2))) flags[a.slice(2)] = args[++i];
+    else flags[a.slice(2)] = true;
+  }
+  return { flags, rest };
+}
+
+/** `@e3`, a selector, or "x,y" / two numbers as a point. */
+function pointOf(parts) {
+  if (parts.length === 2 && parts.every((p) => /^-?\d+(\.\d+)?$/.test(p))) return { x: Number(parts[0]), y: Number(parts[1]) };
+  const xy = parts.length === 1 && /^(-?[\d.]+),(-?[\d.]+)$/.exec(parts[0]);
+  if (xy) return { x: Number(xy[1]), y: Number(xy[2]) };
+  return { target: parts.join(' ') };
+}
+
+function parse([cmd, rawTab, ...a]) {
+  const tab = Number(rawTab);
+  const needTab = () => {
+    if (!Number.isInteger(tab)) usage();
+  };
+  switch (cmd) {
+    case 'tabs': case 'version': return { cmd };
+    case 'reload-extension': return { cmd: 'reload' };
+    case 'open': return rawTab ? { cmd, args: { url: rawTab } } : usage();
+  }
+  needTab();
+  const { flags, rest } = options(a, ['repeat', 'at', 'region']);
+  switch (cmd) {
+    case 'navigate': return rest[0] ? { cmd, args: { tab, url: rest[0] } } : usage();
+    case 'text': case 'close': return { cmd, args: { tab } };
+    case 'snapshot': return { cmd, args: { tab, all: Boolean(flags.all), filter: rest.join(' ') || undefined } };
+    case 'eval': return { cmd, args: { tab, js: a.join(' ') } };
+    case 'type': return { cmd, args: { tab, text: a.join(' ') } };
+    case 'click': {
+      const button = flags.right ? 'right' : 'left';
+      const count = flags.triple ? 3 : flags.double ? 2 : 1;
+      return { cmd, args: { tab, ...pointOf(rest), button, count } };
+    }
+    case 'hover': return { cmd, args: { tab, ...pointOf(rest) } };
+    case 'drag': return rest.length === 2 ? { cmd, args: { tab, from: pointOf([rest[0]]), to: pointOf([rest[1]]) } } : usage();
+    case 'scroll': return { cmd, args: { tab, direction: rest[0] ?? 'down', amount: Number(rest[1] ?? 3), target: flags.at } };
+    case 'scrollto': return { cmd, args: { tab, target: rest.join(' ') } };
+    case 'key': return { cmd, args: { tab, keys: rest, repeat: Number(flags.repeat ?? 1) } };
+    case 'fill': return rest.length >= 2 ? { cmd, args: { tab, target: rest[0], value: rest.slice(1).join(' ') } } : usage();
+    case 'upload': return { cmd, args: { tab, target: rest[0], files: rest.slice(1).map((f) => path.resolve(f)) } };
+    case 'wait': return /^\d+$/.test(rest[0] ?? '') ? { cmd, args: { tab, ms: Number(rest[0]) } } : { cmd, args: { tab, target: rest.join(' ') } };
+    case 'screenshot': return { cmd, args: { tab, region: flags.region?.split(',').map(Number) }, file: rest[0] };
+    case 'network': case 'console': return { cmd, args: { tab, filter: rest.join(' ') || undefined, clear: Boolean(flags.clear) } };
+    case 'body': return { cmd, args: { tab, filter: rest.join(' ') } };
+    case 'dialog': return { cmd, args: { tab, action: rest[0], text: rest.slice(1).join(' ') || undefined } };
+    case 'resize': return { cmd, args: { tab, width: Number(rest[0]), height: Number(rest[1]) } };
+    default: return usage();
+  }
+}
+
+async function call(job) {
+  const { status: code, body } = await request('/cmd', { cmd: job.cmd, args: job.args });
+  if (code !== 200) throw new Error(body?.error ?? `failed (${code})`);
+  return body.value;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv[0] === 'serve') return serve();
+  if (argv[0] === 'stop') {
+    if (fs.existsSync(PID)) process.kill(Number(fs.readFileSync(PID, 'utf8')));
+    return fs.rmSync(PID, { force: true });
+  }
+  if (!argv[0] || argv[0] === 'help' || argv[0] === '--help') usage();
+  const status = await ensureDaemon();
+  if (argv[0] === 'status') {
+    const version = status.extension ? await call({ cmd: 'version' }).catch(() => null) : null;
+    return console.log(JSON.stringify({ daemon: true, ...status, ...version }));
+  }
+  const job = parse(argv);
+  await waitForExtension();
+  const value = await call(job);
+  if (job.cmd === 'screenshot') {
+    fs.mkdirSync(SHOTS, { recursive: true });
+    const file = job.file ?? path.join(SHOTS, `tab${job.args.tab}-${Date.now()}.png`);
+    fs.writeFileSync(file, Buffer.from(value.png, 'base64'));
+    return console.log(`${file} (${value.width}x${value.height}, CSS pixels)`);
+  }
+  console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+}
+
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});
