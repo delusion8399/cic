@@ -17,10 +17,28 @@ cic <command> ──HTTP──► cic daemon (127.0.0.1:18765) ◄──long-pol
 - **Local only.** The daemon listens on 127.0.0.1. Nothing leaves your machine.
 - **No dependencies.** One Node file plus an unpacked MV3 extension.
 
+## Set up with an agent
+
+Paste this into Claude Code, Codex or any coding agent:
+
+```text
+Set up cic (Chrome in CLI) from https://github.com/delusion8399/cic:
+clone it to ~/code/cic, read its README.md and AGENTS.md, run ./install.sh,
+then ask me to load the extension (chrome://extensions → Developer mode → Load unpacked → ~/code/cic/extension).
+When `cic status` prints "extension": true, add this to my global agent instructions
+(~/.claude/CLAUDE.md for Claude Code, ~/.codex/AGENTS.md for Codex):
+
+## Browser: use cic
+To drive Chrome (UI checks, screenshots, network/console), use `cic` (repo ~/code/cic; see its
+README and AGENTS.md). `cic status` first; `cic open <url>` and keep the tab id;
+`cic snapshot <tab>` before acting; close your tabs. If the extension is not connected,
+ask me to load it (chrome://extensions → Load unpacked → ~/code/cic/extension).
+```
+
 ## Install
 
 ```sh
-git clone <this repo> cic && cd cic
+git clone https://github.com/delusion8399/cic.git cic && cd cic
 ./install.sh                     # links bin/cic into ~/.local/bin (BIN_DIR=... to change)
 ```
 
