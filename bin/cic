@@ -221,7 +221,7 @@ async function main() {
   const status = await ensureDaemon();
   if (argv[0] === 'status') {
     const version = status.extension ? await call({ cmd: 'version' }).catch(() => null) : null;
-    return console.log(JSON.stringify({ daemon: true, ...status, ...version }));
+    return console.log(JSON.stringify({ daemon: true, ...status, version: version?.extension ?? null }));
   }
   const job = parse(argv);
   await waitForExtension();
@@ -230,7 +230,10 @@ async function main() {
     fs.mkdirSync(SHOTS, { recursive: true });
     const file = job.file ?? path.join(SHOTS, `tab${job.args.tab}-${Date.now()}.png`);
     fs.writeFileSync(file, Buffer.from(value.png, 'base64'));
-    return console.log(`${file} (${value.width}x${value.height}, CSS pixels)`);
+    const [x0, y0] = job.args.region ?? [];
+    return console.log(job.args.region
+      ? `${file} (${value.width}x${value.height}, region from ${x0},${y0} zoomed ${+value.zoom.toFixed(2)}x: click at ${x0} + x/${+value.zoom.toFixed(2)}, ${y0} + y/${+value.zoom.toFixed(2)})`
+      : `${file} (${value.width}x${value.height}, CSS pixels)`);
   }
   console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
 }

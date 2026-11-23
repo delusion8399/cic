@@ -35,6 +35,11 @@ chrome.debugger.onEvent.addListener(({ tabId }, method, params) => {
       if (entry) entry.status = params.response.status;
       break;
     }
+    case 'Network.loadingFailed': {
+      const entry = net.find((r) => r.id === params.requestId);
+      if (entry) entry.failed = params.blockedReason ?? (params.canceled ? 'canceled' : params.errorText);
+      break;
+    }
     case 'Runtime.consoleAPICalled':
       logs.push({
         level: params.type,
@@ -200,7 +205,7 @@ async function screenshot(tabId, clip) {
     format: 'png',
     clip: { ...area, scale: scale * view.dpr },
   });
-  return { png: data, width: Math.round(area.width * scale * view.dpr), height: Math.round(area.height * scale * view.dpr) };
+  return { png: data, width: Math.round(area.width * scale * view.dpr), height: Math.round(area.height * scale * view.dpr), zoom: scale * view.dpr };
 }
 
 const commands = {
@@ -351,11 +356,13 @@ const commands = {
     const log = network.get(tab) ?? [];
     const rows = log.filter((r) => !filter || r.url.includes(filter));
     if (clear) network.set(tab, []);
-    return rows.map(({ method, url, status, type }) => ({ method, url, status, type }));
+    return rows.map(({ method, url, status, failed, type }) => ({ method, url, status, failed, type }));
   },
   async body({ tab, filter }) {
     await ownTab(tab);
-    const entry = (network.get(tab) ?? []).filter((r) => r.url.includes(filter) && r.status && r.method !== 'OPTIONS').pop();
+    // A URL ending in the filter beats one that only contains it (`host/` vs `host/favicon.ico`).
+    const done = (network.get(tab) ?? []).filter((r) => r.url.includes(filter) && r.status && r.method !== 'OPTIONS');
+    const entry = done.filter((r) => r.url.split('?')[0].endsWith(filter)).pop() ?? done.pop();
     if (!entry) throw new Error(`no finished request matching ${filter}`);
     const { body, base64Encoded } = await cdp(tab, 'Network.getResponseBody', { requestId: entry.id });
     return { url: entry.url, status: entry.status, body: base64Encoded ? `(base64, ${body.length} chars)` : body };

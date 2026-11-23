@@ -45,7 +45,7 @@ git clone https://github.com/delusion8399/cic.git cic && cd cic
 Then load the extension: `chrome://extensions` → Developer mode → **Load unpacked** → `cic/extension`.
 
 ```sh
-cic status      # {"daemon":true,"extension":true,"extension":"0.2.0"}
+cic status      # {"daemon":true,"extension":true,"version":"0.2.1"}
 ```
 
 The daemon starts on the first command; `cic stop` stops it. State lives in `~/.cic`.
@@ -74,8 +74,8 @@ pixels as a `screenshot`, so a point read off a screenshot can be clicked as is.
 | `cic upload <tab> <target> <file...>` | Set a file input |
 | `cic wait <tab> <target\|ms>` | Wait for an element or a time |
 | `cic screenshot <tab> [file.png] [--region x0,y0,x1,y1]` | PNG of the viewport, or a zoomed region |
-| `cic network <tab> [filter] [--clear]` | Requests the tab made, with status |
-| `cic body <tab> <filter>` | Body of the last finished request matching `filter` |
+| `cic network <tab> [filter] [--clear]` | Requests the tab made, with status, or `failed` and the reason |
+| `cic body <tab> <filter>` | Body of the last finished request whose URL ends with `filter`, else contains it |
 | `cic console <tab> [regex] [--clear]` | Console messages, exceptions and browser log entries |
 | `cic dialog <tab> [accept\|dismiss] [text]` | Show or answer an open alert/confirm/prompt |
 | `cic resize <tab> <width> <height>` | Resize the window |
